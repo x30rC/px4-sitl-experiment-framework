@@ -1,0 +1,54 @@
+diff --git a/src/modules/simulation/gz_bridge/GZBridge.cpp b/src/modules/simulation/gz_bridge/GZBridge.cpp
+index 8e917e4afc..833f8b5b7f 100644
+--- a/src/modules/simulation/gz_bridge/GZBridge.cpp
++++ b/src/modules/simulation/gz_bridge/GZBridge.cpp
+@@ -42,6 +42,7 @@
+ 
+ #include <iostream>
+ #include <string>
++#include <cstdlib>
+ 
+ ModuleBase::Descriptor GZBridge::desc{task_spawn, custom_command, print_usage};
+ 
+@@ -227,6 +228,13 @@ bool GZBridge::subscribeImu(bool required)
+ {
+ 	std::string imu_topic = "/world/" + _world_name + "/model/" + _model_name + "/link/base_link/sensor/imu_sensor/imu";
+ 
++	if (const char *imu_topic_override = std::getenv("PX4_GZ_IMU_TOPIC")) {
++		if (imu_topic_override[0] != '\0') {
++			imu_topic = imu_topic_override;
++			PX4_INFO("using IMU topic override: %s", imu_topic.c_str());
++		}
++	}
++
+ 	if (!_node.Subscribe(imu_topic, &GZBridge::imuCallback, this)) {
+ 		PX4_ERR("failed to subscribe to %s", imu_topic.c_str());
+ 		return required ? false : true;
+@@ -436,6 +444,15 @@ void GZBridge::imuCallback(const gz::msgs::IMU &msg)
+ {
+ 	const uint64_t timestamp = hrt_absolute_time();
+ 
++	// Multiple Gazebo Transport callbacks can be delivered during one
++	// simulation tick. PX4 sensor drivers require strictly increasing sample
++	// timestamps, so keep at most one IMU sample per synchronized hrt tick.
++	if (timestamp <= _imu_timestamp_prev) {
++		return;
++	}
++
++	_imu_timestamp_prev = timestamp;
++
+ 	// FLU -> FRD
+ 	static const auto q_FLU_to_FRD = gz::math::Quaterniond(0, 1, 0, 0);
+ 
+diff --git a/src/modules/simulation/gz_bridge/GZBridge.hpp b/src/modules/simulation/gz_bridge/GZBridge.hpp
+index 31c892d539..d200997180 100644
+--- a/src/modules/simulation/gz_bridge/GZBridge.hpp
++++ b/src/modules/simulation/gz_bridge/GZBridge.hpp
+@@ -175,6 +175,7 @@ private:
+ 	matrix::Vector3d _velocity_prev{};
+ 	matrix::Vector3f _euler_prev{};
+ 	hrt_abstime _timestamp_prev{};
++	hrt_abstime _imu_timestamp_prev{};
+ 
+ 	const std::string _world_name;
+ 	const std::string _model_name;

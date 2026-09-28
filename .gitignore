@@ -1,0 +1,32 @@
+# Machine-specific environments, generated files and experiment output
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+logs/
+*.ulg
+*.ulog
+*.csv
+
+# Credentials and OS/editor metadata
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*token*
+*secret*
+*.p12
+*:Zone.Identifier
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~

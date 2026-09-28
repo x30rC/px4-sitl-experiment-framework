@@ -1,0 +1,8 @@
+# Keep the repository readable on Linux and Windows regardless of local CRLF.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.plan text eol=lf
+*.patch text eol=lf
+*.patch -whitespace
+*.docx binary

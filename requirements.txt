@@ -1,0 +1,5 @@
+# Runtime dependencies for mission control and GCS heartbeat (Python 3.12).
+# Gazebo Python bindings (gz.msgs10 and gz.transport13) are Ubuntu packages,
+# NOT pip dependencies. Create venv with --system-site-packages; see doc/INSTALL.md.
+mavsdk==3.17.2
+pymavlink==2.4.49
