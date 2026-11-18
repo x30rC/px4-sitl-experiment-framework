@@ -30,3 +30,10 @@ logs/
 .idea/
 *.swp
 *~
+
+# Local scratch files
+.tmp/
+
+# Documentation contains Markdown only; PX4 patches live in patches/.
+doc/*
+!doc/*.md

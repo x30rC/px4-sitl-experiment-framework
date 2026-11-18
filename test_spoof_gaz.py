@@ -6,19 +6,24 @@ import sys
 import unittest
 from pathlib import Path
 
-import g
-import i
+import gps_publisher
+import imu_publisher
 import run_test
 from spoof_runtime import ActiveIdleSchedule
 from spoof_test.gcs import GcsHeartbeatService
 from spoof_test.mission import MavsdkMissionService
-from spoof_test.paths import PROJECT_ROOT, PROJECT_VENV_PYTHON
+from spoof_test.paths import (
+    GPS_SPOOF_SCRIPT,
+    IMU_SPOOF_SCRIPT,
+    PROJECT_ROOT,
+    PROJECT_VENV_PYTHON,
+)
 from spoof_test.settings import GpsSpoofSettings, ImuSpoofSettings, SimulationTestSettings
 
 
 class GpsConfigurationTests(unittest.TestCase):
     def test_intensity_interpolates_coordinates(self):
-        settings = g.SpoofConfig(intensity_percent=50.0)
+        settings = gps_publisher.SpoofConfig(intensity_percent=50.0)
         self.assertEqual(
             tuple(round(value, 6) for value in settings.effective_coordinates),
             (47.3985, 8.5455, 494.0),
@@ -26,13 +31,13 @@ class GpsConfigurationTests(unittest.TestCase):
 
     def test_default_full_topic_is_preserved(self):
         self.assertEqual(
-            g.SpoofConfig().topic,
+            gps_publisher.SpoofConfig().topic,
             "/world/default/model/x500_0/link/base_link/sensor/navsat_sensor/navsat",
         )
 
     def test_partial_periodic_schedule_is_rejected(self):
         with self.assertRaises(ValueError):
-            g.SpoofConfig(active_seconds=5.0, idle_seconds=0.0).validate()
+            gps_publisher.SpoofConfig(active_seconds=5.0, idle_seconds=0.0).validate()
 
 
 class ActiveIdleScheduleTests(unittest.TestCase):
@@ -52,19 +57,19 @@ class ActiveIdleScheduleTests(unittest.TestCase):
 class ImuConfigurationTests(unittest.TestCase):
     def test_default_topic_matches_px4_gz_bridge(self):
         self.assertEqual(
-            i.ImuSpoofSettings().topic,
+            imu_publisher.ImuSpoofSettings().topic,
             "/world/default/model/x500_0/link/base_link/sensor/imu_sensor/imu",
         )
 
     def test_entity_name_uses_model_name(self):
-        settings = i.ImuSpoofSettings(model_name="vehicle_7")
+        settings = imu_publisher.ImuSpoofSettings(model_name="vehicle_7")
         self.assertEqual(settings.entity_name, "vehicle_7::base_link::imu_sensor")
 
     def test_intensity_scales_only_configured_offsets(self):
-        settings = i.ImuSpoofSettings(
+        settings = imu_publisher.ImuSpoofSettings(
             intensity_percent=50.0,
-            angular_velocity_offset=i.Vector3(0.2, -0.4, 1.0),
-            linear_acceleration_offset=i.Vector3(2.0, 4.0, -6.0),
+            angular_velocity_offset=imu_publisher.Vector3(0.2, -0.4, 1.0),
+            linear_acceleration_offset=imu_publisher.Vector3(2.0, 4.0, -6.0),
         )
         self.assertEqual(
             settings.effective_angular_velocity.as_tuple(),
@@ -77,13 +82,13 @@ class ImuConfigurationTests(unittest.TestCase):
 
     def test_default_gravity_is_positive_z_in_gazebo_flu(self):
         self.assertEqual(
-            i.ImuSpoofSettings().effective_linear_acceleration.as_tuple(),
+            imu_publisher.ImuSpoofSettings().effective_linear_acceleration.as_tuple(),
             (0.0, 0.0, 9.81),
         )
 
     def test_partial_periodic_schedule_is_rejected(self):
         with self.assertRaises(ValueError):
-            i.ImuSpoofSettings(active_seconds=1.0, idle_seconds=0.0).validate()
+            imu_publisher.ImuSpoofSettings(active_seconds=1.0, idle_seconds=0.0).validate()
 
     def test_baseline_message_has_no_spoof_offset(self):
         class Message:
@@ -95,10 +100,10 @@ class ImuConfigurationTests(unittest.TestCase):
                 from gz.msgs10.imu_pb2 import IMU
                 return IMU()
 
-        settings = i.ImuSpoofSettings(
-            angular_velocity_offset=i.Vector3(0.0, 0.0, 0.8)
+        settings = imu_publisher.ImuSpoofSettings(
+            angular_velocity_offset=imu_publisher.Vector3(0.0, 0.0, 0.8)
         )
-        publisher = i.ImuSpoofPublisher(settings)
+        publisher = imu_publisher.ImuSpoofPublisher(settings)
         baseline = publisher.build_message(Message, spoofed=False)
         spoofed = publisher.build_message(Message, spoofed=True)
         self.assertEqual(baseline.angular_velocity.z, 0.0)
@@ -191,6 +196,20 @@ class ModularRunTestSettingsTests(unittest.TestCase):
 
 
 class MissionStartupTests(unittest.TestCase):
+    def test_publisher_commands_reference_existing_named_scripts(self):
+        self.assertEqual(GPS_SPOOF_SCRIPT, PROJECT_ROOT / "gps_publisher.py")
+        self.assertEqual(IMU_SPOOF_SCRIPT, PROJECT_ROOT / "imu_publisher.py")
+        for script in (GPS_SPOOF_SCRIPT, IMU_SPOOF_SCRIPT):
+            self.assertTrue(script.is_file(), script)
+        self.assertEqual(
+            GpsSpoofSettings().build_command(Path("/tmp/python"))[2],
+            str(GPS_SPOOF_SCRIPT),
+        )
+        self.assertEqual(
+            ImuSpoofSettings().build_command(Path("/tmp/python"))[2],
+            str(IMU_SPOOF_SCRIPT),
+        )
+
     def test_project_root_follows_the_imported_project_copy(self):
         self.assertEqual(PROJECT_ROOT, Path(__file__).resolve().parent)
 

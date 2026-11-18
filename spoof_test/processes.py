@@ -9,7 +9,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,26 @@ class ProcessSupervisor:
 
     def __init__(self) -> None:
         self._managed_processes: list[ManagedProcess] = []
+
+    @staticmethod
+    def gazebo_server_running() -> bool:
+        """Проверяет именно сервер мира PX4, не GUI gz sim -g."""
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                arguments = (entry / "cmdline").read_bytes().split(b"\0")
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            if (
+                len(arguments) > 3
+                and Path(arguments[0].decode(errors="replace")).name == "gz"
+                and arguments[1] == b"sim"
+                and b"-s" in arguments
+                and any(b"PX4-Autopilot/Tools/simulation/gz/worlds/" in arg for arg in arguments)
+            ):
+                return True
+        return False
 
     @staticmethod
     def _stale_simulation_pids() -> list[int]:
@@ -236,6 +256,8 @@ class ProcessSupervisor:
     def wait_processes_while_running(
         description: str,
         processes: Sequence[tuple[subprocess.Popen, float]],
+        *,
+        healthcheck: Callable[[], None] | None = None,
     ) -> None:
         seconds = max((duration for _, duration in processes), default=0.0)
         if seconds <= 0.0:
@@ -245,6 +267,8 @@ class ProcessSupervisor:
         deadline = time.monotonic() + seconds
         next_progress_report = time.monotonic() + 5.0
         while True:
+            if healthcheck is not None:
+                healthcheck()
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0.0:
                 return

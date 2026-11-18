@@ -2,74 +2,152 @@
 
 [Содержание](README.md) · [Установка](INSTALL.md) · [Запуск](USAGE.md)
 
-## Краткая схема
+## Поток данных
 
 ```text
-run_test.py -> spoof_test.cli -> settings -> spoof_test.workflow
-                                         |-> processes -> make px4_sitl gz_x500
-                                         |-> gcs -> MAVLink GCS heartbeat -> PX4:18570
-                                         |-> mission -> MAVSDK -> PX4:14540
-                                         |-> g.py -> Gazebo NavSat topic -> PX4 GZ bridge
-                                         |-> i.py (source Gazebo IMU -> /spoof_gaz/imu)
-                                         |          -> патченный PX4 GZ bridge
-                                         `-> logs -> PX4 ULog -> logs/
+run_test.py -> spoof_test.cli -> settings / sensor_settings -> workflow
+  |-> processes -> make px4_sitl gz_x500 -> PX4 + Gazebo
+  |-> readiness -> реальные входные потоки датчиков Gazebo
+  |-> goal_marker -> визуальная метка waypoint
+  |-> gcs -> MAVLink GCS heartbeat -> PX4:18570
+  |-> mission -> MAVSDK -> PX4:14540
+  |-> gps_publisher.py -> штатный Gazebo NavSat topic -> PX4
+  |-> imu_publisher.py -> /spoof_gaz/imu -> патченный PX4 bridge
+  |-> sensor_relay.py -> /spoof_gaz/mag или /spoof_gaz/baro -> PX4 bridge
+  `-> logs -> копия нового PX4 ULog -> consolidate_logs.py
+                                       |-> dataset -> один CSV на ULog
+                                       `-> plots -> trajectory/altitude/diagnostics PNG
 ```
 
-`run_test.py` — тонкая точка входа с прежними именами классов для совместимости; новая логика живёт в пакете `spoof_test`. Миссия, GPS и IMU независимы на уровне классов настроек, но единый workflow обеспечивает корректный порядок запуска и остановки.
+`run_test.py` — точка входа, сохраняющая прежние импортируемые имена классов.
+Оркестрация находится в `spoof_test/`, самостоятельные публикаторы — в корне.
+Патчи внешнего PX4 находятся в [patches](../patches/README.md).
 
-| Путь относительно проекта | Роль и ключевые объекты |
+## Модули
+
+| Путь | Назначение |
 | --- | --- |
-| `spoof_test/cli.py` | `build_argument_parser`, `settings_from_arguments`, вопросы интерактивного режима, `restart_in_project_venv_if_needed`, `main` |
-| `spoof_test/paths.py` | `PROJECT_ROOT` из местоположения пакета, фиксированный `PX4_ROOT = ~/PX4-Autopilot`, поиск рабочего venv, пути mission/logs |
-| `spoof_test/settings.py` | `GpsSpoofSettings`, `ImuSpoofSettings`, `SimulationTestSettings`: валидация, формирование команд дочерних скриптов |
-| `spoof_test/workflow.py` | `GpsSpoofTestWorkflow`: проверка окружения, запуск, активация, контроль результатов и `finally`/cleanup |
-| `spoof_test/processes.py` | `ProcessSupervisor`: process group, обнаружение stale PX4/Gazebo/MAVSDK, остановка дочерних процессов, ожидание |
-| `spoof_test/mission.py` | `MavsdkMissionService`: импорт QGC `.plan`, `mission_raw`, арминг, подтверждение flight mode/progress с тайм-аутами |
-| `spoof_test/gcs.py` | `GcsHeartbeatService`: MAVLink `MAV_TYPE_GCS` каждые ~1 сек до конца теста |
-| `spoof_test/logs.py` | `Px4LogCollector`: ищет новый `.ulg` с момента старта и копирует в текущую копию проекта |
-| `spoof_runtime.py` | `ActiveIdleSchedule` и `parse_finite_float`, чистая логика без Gazebo |
-| `g.py` | `SpoofConfig`, `GpsSpoofer`: NavSat-публикация и расписание active/idle |
-| `i.py` | `ImuSpoofSettings`, `ImuSpoofPublisher`: самостоятельный IMU generator **или** relay-transform исходного Gazebo IMU |
-| `test_spoof_gaz.py` | Python `unittest`: конфигурация, CLI, расчёты и отдельные элементы workflow без старта симулятора |
-| `consolidate_logs.py` | Необязательная и **разрушающая** постобработка ULog → CSV: см. [предупреждение](USAGE.md#миссия-и-логи) |
+| `spoof_test/cli.py` | Парсер, меню, интерактивная настройка, сбор настроек и перезапуск через venv |
+| `spoof_test/paths.py` | Корень текущей копии, фиксированный `~/PX4-Autopilot`, поиск venv, пути миссии/логов |
+| `spoof_test/settings.py` | `GpsSpoofSettings`, `ImuSpoofSettings`, `SimulationTestSettings`: валидация и команды публикаторов |
+| `spoof_test/sensor_settings.py` | `RelaySettings` для mag/baro: единицы измерения, топики, переменные bridge и CLI |
+| `spoof_test/workflow.py` | `GpsSpoofTestWorkflow`: отдельные прогоны, запуск, активация, контроль и cleanup |
+| `spoof_test/processes.py` | `ProcessSupervisor`: process groups, stale PX4/Gazebo/MAVSDK, ожидание и остановка |
+| `spoof_test/readiness.py` | Ожидание реальных сообщений GPS и выбранных датчиков до миссии |
+| `spoof_test/sim_clock.py` | `SimulationClock`: ожидание окна по времени Gazebo и контроль остановки часов |
+| `spoof_test/mission.py` | MAVSDK, QGC Plan, ожидание health/armable, арминг и подтверждение старта миссии |
+| `spoof_test/gcs.py` | GCS heartbeat до конца прогона, UDP `18570` |
+| `spoof_test/goal_marker.py` | Конечный waypoint и статическая метка Gazebo без столкновений |
+| `spoof_test/routes.py` | Воспроизводимые варианты направления/дистанции без изменения шаблона миссии |
+| `spoof_test/logs.py` | Снимок существующих ULog и копирование нового лога в текущую копию проекта |
+| `spoof_runtime.py` | `ActiveIdleSchedule` и `parse_finite_float`, без Gazebo-зависимостей |
+| `gps_publisher.py` | `SpoofConfig`, `GpsSpoofer`: координаты NavSat, active/idle и выбор часов |
+| `imu_publisher.py` | `ImuSpoofPublisher`: статический генератор или relay исходного IMU с offset |
+| `sensor_relay.py` | Копирование и изменение сообщений mag/baro, активация через `SIGUSR1` |
+| `consolidate_logs.py` | Выбор ULog, временный экспорт, один CSV и три PNG без перезаписи готовых результатов |
+| `spoof_test/dataset.py` | Временное выравнивание диагностических потоков и сравнение с ground truth SITL |
+| `spoof_test/plots.py` | Файлы графиков по CSV, без открытия GUI |
 
-## Как работает полный запуск
+Имена `g.py` и `i.py` заменены на `gps_publisher.py` и `imu_publisher.py`.
+`doc/` содержит только Markdown. `logs/`, `venv/`, CSV/ULog, кэш Python
+и служебные файлы Windows исключены из Git.
 
-1. `cli.main()` при необходимости перезапускается через локальный исполняемый venv (`sys.prefix`, а не путь symlink-интерпретатора); читает CLI/ввод пользователя, создаёт immutable dataclass-настройки.
-2. Workflow валидирует окружение и конфигурацию. При `--dry-run` только печатает команды и **выходит до старта PX4**.
-3. При обычном запуске supervisor завершает stale-процессы данного симулятора текущего пользователя и запускает `make px4_sitl gz_x500`. Ручные экземпляры другого своего эксперимента тоже могут попасть под очистку: не запускайте параллельные тесты.
-4. Для `imu` / `both` до миссии запускается **один** relay IMU с `--wait-for-activation` и выходным топиком `/spoof_gaz/imu`. Для запущенного workflow PX4 получает `PX4_GZ_IMU_TOPIC` из настроек. Этот контракт реализует прилагаемый [PX4 patch](px4-gz-imu-topic.patch), он **не входит** в обычный upstream PX4.
-5. Если миссия включена: `GcsHeartbeatService.start()` → MAVSDK connect (`udpin://0.0.0.0:14540`) → health (local/global/home/armable) → QGC import/upload → arm и подтверждение → `mission_raw.start_mission()` → подтверждение `MISSION` и progress. При отказе миссии GPS/IMU attack не стартует.
-6. После стабилизации запускается `g.py` (если выбран GPS); для IMU отправляется `SIGUSR1` уже работающему relay — без смены IMU-потока при арминге. Supervisor ожидает заданную длительность и код завершения дочерних процессов.
-7. `finally` останавливает heartbeat и процессы; в IMU-режиме PX4 останавливается **раньше** relay, чтобы не получить sensor timeout. Если PX4 был запущен workflow, `Px4LogCollector` копирует только лог этого запуска.
+## Жизненный цикл прогона
 
-`--skip-mission` пропускает загрузку плана и арминг; `--skip-px4` передаёт управление внешнему SITL и не копирует ULog. При IMU + `--skip-px4` внешний процесс должен быть запущен с тем же `PX4_GZ_IMU_TOPIC`, иначе PX4 подпишется на неправильный поток.
+1. CLI выбирает исполняемый Linux venv и создаёт настройки. Путь к миссии и
+   логам определяется текущим проектом. Повреждённый venv пропускается.
+2. Workflow проверяет настройки и окружение. `--dry-run` выводит команды и
+   координаты, завершаясь до запуска процессов. Чтобы проверить команды без
+   установленного PX4/MAVSDK, добавьте `--skip-px4 --skip-mission`.
+3. При управляемом запуске supervisor очищает stale-процессы симулятора текущего
+   пользователя, создаёт уникальный `GZ_PARTITION` и запускает PX4. Это может
+   завершить другой собственный ручной эксперимент: параллельные запуски
+   не поддерживаются. После начальной задержки `readiness` ждёт до 60 секунд
+   реальные сообщения GPS и выбранных датчиков.
+4. Для IMU/mag/baro создаются baseline relay до миссии. PX4 получает переменные
+   `PX4_GZ_IMU_TOPIC`, `PX4_GZ_MAG_TOPIC`, `PX4_GZ_BARO_TOPIC` выбранных датчиков
+   и подписывается на выходные топики relay. В режиме `none` overrides снимаются,
+   процессы подмены не создаются.
+5. При управляемом PX4 и включённой миссии создаётся визуальная метка цели.
+   Ошибка маркера выдаёт предупреждение. Затем запускается GCS heartbeat,
+   MAVSDK подключается к `udpin://0.0.0.0:14540`, ждёт health, импортирует и
+   загружает план, армит, подтверждает режим `MISSION` и прогресс. Ошибка
+   обязательной миссии прерывает сценарий до активации подмены.
+6. После стабилизации стартует GPS publisher; relay получают `SIGUSR1`, сохраняя
+   тот же поток датчика. Окно эксперимента контролируется выбранными часами и
+   состоянием дочерних процессов. В `none` ожидается `--baseline-duration`.
+7. В `finally` останавливаются heartbeat и процессы. Для relay PX4 завершается
+   раньше потока датчиков, чтобы избежать sensor timeout. Восстанавливается
+   прежнее значение `GZ_PARTITION`.
+8. После управляемого PX4 копируется новый ULog, при случайном маршруте — также
+   использованный QGC Plan. Создаются CSV и три PNG в `logs/`. Только после
+   успешного экспорта временная папка с ULog и Plan удаляется. При ошибке она
+   сохраняется, код завершения ненулевой. Ручной конвертер исходники не удаляет.
 
-## Данные датчиков и время
+`--skip-mission` пропускает heartbeat, план и арминг; `--skip-px4` оставляет
+внешний SITL под управлением пользователя и отключает автоматический сбор
+лога. Для внешнего PX4 все overrides выбранных relay должны совпадать и
+присутствовать в окружении обоих процессов. Partition также должна совпадать.
 
-**GPS:** `g.py` вычисляет координаты из reference/target и `%` смещения. В активной фазе публикует `gz.msgs.NavSat` в `/world/default/model/x500_0/link/base_link/sensor/navsat_sensor/navsat`, в паузе прекращает свою публикацию. Это не замена фильтра EKF и не гарантия, что PX4 примет каждую посылку.
+При `--repeats N` перед каждым прогоном перезапускаются PX4/Gazebo и сервисы.
+Меняется только конечный waypoint поддерживаемого QGC Plan, взлёт и высота
+сохраняются. `--route-seed` позволяет повторить набор координат при том же
+шаблоне и числе прогонов. Первая ошибка останавливает серию. Завершение по
+времени не подтверждает достижение waypoint.
 
-**IMU:** штатный сенсор x500 выдаёт `gz.msgs.IMU` на `/world/default/model/x500_0/link/base_link/sensor/imu_sensor/imu`. `i.py` копирует исходное сообщение, его timestamp и динамические компоненты, при активности добавляет заданный в FLU offset к выбранным сообщениям, затем публикует **в отдельном** `/spoof_gaz/imu`. Остальные сообщения пересылаются без изменения: частота применения offset не должна уменьшать основной baseline-поток. Активные/пассивные интервалы relay привязаны ко времени симуляции (Gazebo clock / исходные IMU timestamps), не к интервалу ожидания CLI. Настоящая ориентация/шум из исходного сообщения сохраняются. Самостоятельный `python3 i.py` без source-topic — статический генератор для обучения, а не полный relay-тест полёта.
+## Датчики и время
 
-`ActiveIdleSchedule` возвращает активность по `elapsed % (active + idle)`; оба периода должны быть положительными или оба нулевыми. Значение `0/0` означает постоянную активную фазу. В Gazebo→PX4 bridge координаты IMU переводятся из FLU (Y влево, Z вверх) в FRD (Y вправо, Z вниз). Патч PX4 выбирает выходной топик и игнорирует повторные IMU callbacks в одном PX4 simulation tick для строгого возрастания timestamp.
+GPS публикуется в штатный NavSat topic x500. Координаты вычисляются по формуле
+`reference + (target - reference) * intensity / 100`. В idle publisher не
+публикует ложных сообщений; он не заставляет EKF вернуться к истинной позиции.
+
+IMU relay копирует исходное сообщение, timestamp, ориентацию и шум. Offset
+добавляется к части сообщений с частотой `--imu-rate-hz`; остальные
+передаются без изменения. Полная частота потока не снижается. Значения gyro
+задаются в рад/с, accel — в м/с², в Gazebo FLU; bridge переводит их в PX4 FRD.
+Без `--source-topic` самостоятельный IMU publisher — статический генератор.
+
+Mag/baro relay также сохраняют поток и меняют только выбранные измерения:
+`field_tesla` в Tesla и давление в Pa. Все смещения масштабируются на
+`intensity / 100`; параметры по умолчанию описаны в [USAGE.md](USAGE.md).
+
+`--time-mode sync` привязывает GPS к Gazebo clock, relay — к timestamp входных
+сообщений. `async` использует монотонные часы процесса; это значение по
+умолчанию полного CLI. Relay в обоих режимах требуют входные сообщения.
+Остановка Gazebo clock или потока надолго приводит к ошибке, а не успеху.
+
+`ActiveIdleSchedule` проверяет `elapsed % (active + idle)`. Оба периода
+положительны или оба равны нулю; `0/0` означает постоянную активность.
+Подробности выравнивания CSV, возраст измерений и ограничения ground truth
+описаны в [руководстве по логам](USAGE.md#миссия-и-логи).
 
 ## Где менять поведение
 
-- Новая CLI-опция: объявить в `spoof_test/cli.py`, передать в соответствующий dataclass из `spoof_test/settings.py`, добавить в `build_command()` при настройке дочернего процесса. Для самостоятельного публикатора добавить аргумент в его `build_argument_parser()`.
-- Другая модель/мир: GPS/IMU topic зависят от имени модели. В полном workflow IMU `source_topic` и `PX4_GZ_IMU_TOPIC` должны совпасть с фактическими Gazebo topics; проверять через `gz topic -l`. Для другого PX4 пути сейчас требуется изменение `PX4_ROOT` в `spoof_test/paths.py`.
-- Изменение MAVSDK-протокола: `spoof_test/mission.py`, не смешивать MAVSDK onboard-connection и GCS heartbeat в `spoof_test/gcs.py`. Не отключайте PX4 preflight checks ради успешного теста.
-- Изменение потоков/cleanup: `spoof_test/workflow.py` и `spoof_test/processes.py`; при IMU особенно важно сохранять relay до завершения PX4 и не подписывать bridge на два разных IMU topic одновременно.
-- PX4 patch: приложенный diff предназначен для указанной в установке ревизии PX4. После изменений bridge пересобирайте PX4; этот код живёт **за пределами** Python-проекта.
+- CLI и меню: `cli.py`, затем dataclass в `settings.py` или `sensor_settings.py`
+  и передача аргументов в команду публикатора.
+- Мир и модель: топики в настройках и `readiness.py`, согласованные overrides
+  PX4; проверить фактические имена через `gz topic -l`.
+- Подключение MAVSDK: `mission.py`; GCS heartbeat поддерживается в `gcs.py`.
+- Запуск/остановка: `workflow.py` и `processes.py`; сохранять relay до остановки
+  PX4, избегать двух конкурирующих потоков одного датчика.
+- Экспорт и графики: `consolidate_logs.py`, `dataset.py`, `plots.py`.
+- GZ bridge: патчи в `patches/`, применяемые к внешнему PX4 с пересборкой.
 
-## Проверки перед отправкой изменений
+## Проверки перед отправкой
 
 ```bash
-cd "$HOME/spoof_gaz"
-./venv/bin/python -m compileall -q g.py i.py run_test.py spoof_runtime.py spoof_test test_spoof_gaz.py
-./venv/bin/python -m unittest -v test_spoof_gaz.py
-python3 g.py --check
-python3 i.py --check
-python3 run_test.py --dry-run --non-interactive --spoof-sensor both --skip-mission
+cd "$HOME/_spoof_gaz"
+./venv/bin/python -m unittest discover -p 'test_*.py' -v
+python3 gps_publisher.py --check
+python3 imu_publisher.py --check
+python3 sensor_relay.py --help
+python3 run_test.py --dry-run --non-interactive --spoof-sensor gps,imu,mag,baro \
+  --skip-mission --skip-px4 --time-mode sync
 ```
 
-`test_spoof_gaz.py` содержит проверки, зависящие от обнаруженного рабочего venv: на новой машине **сначала** выполните [шаг создания venv](INSTALL.md#3-создание-собственного-виртуального-окружения). Unit-тесты и dry-run не проверяют сетевую связность Gazebo, фактический полёт и применение патча PX4. После изменения их проверяют коротким SITL-прогоном из [USAGE.md](USAGE.md#безопасная-ступенчатая-проверка) и анализом нового `.ulg`.
+`test_*.py` проверяют конфигурацию, CLI/меню, маршруты, сохранение исходных
+ULog при ручной конвертации, CSV/PNG, relay, часы, readiness и маркер цели.
+Тесты используют Gazebo Python bindings, но не запускают физический симулятор.
+Для проверок venv сначала выполните [его установку](INSTALL.md#3-создание-собственного-виртуального-окружения).
+Unit-тесты и dry-run не подтверждают фактический полёт, сетевую связность или
+применение патчей. Для этого нужен отдельный SITL-прогон из [USAGE.md](USAGE.md#безопасная-ступенчатая-проверка).

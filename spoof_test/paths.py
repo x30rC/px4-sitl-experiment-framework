@@ -9,8 +9,9 @@ PX4_ROOT = HOME_DIRECTORY / "PX4-Autopilot"
 # Не привязываемся к имени каталога: поддерживаются как ``spoof_gaz``, так и
 # ``_spoof_gaz`` и другие копии проекта.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-GPS_SPOOF_SCRIPT = PROJECT_ROOT / "g.py"
-IMU_SPOOF_SCRIPT = PROJECT_ROOT / "i.py"
+GPS_SPOOF_SCRIPT = PROJECT_ROOT / "gps_publisher.py"
+IMU_SPOOF_SCRIPT = PROJECT_ROOT / "imu_publisher.py"
+SENSOR_RELAY_SCRIPT = PROJECT_ROOT / "sensor_relay.py"
 MISSION_PLAN = PROJECT_ROOT / "mission.plan"
 LOG_DESTINATION = PROJECT_ROOT / "logs"
 

@@ -60,6 +60,7 @@ class SpoofConfig:
     start_delay_seconds: float = 0.0
     duration_seconds: float = 0.0
     status_interval_seconds: float = 5.0
+    time_mode: str = "async"
 
     @property
     def topic(self) -> str:
@@ -88,6 +89,8 @@ class SpoofConfig:
 
     def validate(self) -> None:
         errors: list[str] = []
+        if self.time_mode not in {"sync", "async"}:
+            errors.append("time_mode должен быть sync или async")
         if not self.world_name.strip():
             errors.append("имя мира не может быть пустым")
         if not self.model_name.strip():
@@ -154,6 +157,15 @@ class GpsSpoofer:
         self.config = config
         self.stop_event = Event()
         self.published_messages = 0
+        self._clock_time = None
+        self._clock_received_at = None
+
+    def _clock_callback(self, message) -> None:
+        stamp = message.sim
+        now = stamp.sec + stamp.nsec / 1e9
+        if self._clock_time is None or now > self._clock_time:
+            self._clock_time = now
+            self._clock_received_at = time.monotonic()
 
     @staticmethod
     def load_gazebo_bindings():
@@ -221,6 +233,7 @@ class GpsSpoofer:
             f"lat={latitude:.8f}, lon={longitude:.8f}, alt={altitude:.2f}"
         )
         print(f"Частота: {self.config.publish_rate_hz:g} Гц")
+        print(f"Источник времени: {'Gazebo clock' if self.config.time_mode == 'sync' else 'монотонные часы'}")
         print(f"Режим: {mode}")
         print(f"Длительность: {duration}")
         if self.config.start_delay_seconds:
@@ -238,6 +251,17 @@ class GpsSpoofer:
 
         Node, NavSat = self.load_gazebo_bindings()
         node = Node()
+        if self.config.time_mode == "sync":
+            from gz.msgs10.clock_pb2 import Clock
+            if not node.subscribe(Clock, f"/world/{self.config.world_name}/clock", self._clock_callback):
+                raise RuntimeError("не удалось подписаться на Gazebo clock")
+            deadline = time.monotonic() + 15
+            while self._clock_time is None and not self.stop_event.is_set():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Gazebo clock не передаёт время")
+                self._wait(0.05)
+            if self.stop_event.is_set():
+                return 0
         publisher = node.advertise(self.config.topic, NavSat)
         if publisher is None:
             raise RuntimeError(f"не удалось создать publisher для топика {self.config.topic}")
@@ -253,14 +277,21 @@ class GpsSpoofer:
             idle_seconds=self.config.idle_seconds,
         )
         interval = 1.0 / self.config.publish_rate_hz
-        started_at = time.monotonic()
+        started_at = self._clock_time if self.config.time_mode == "sync" else time.monotonic()
         next_publish_at = started_at
-        next_status_at = started_at + self.config.status_interval_seconds
+        next_status_at = time.monotonic() + self.config.status_interval_seconds
         previous_active: bool | None = None
+        last_clock_time = None
 
         print("GPS-спуфер запущен. Для остановки нажмите Ctrl+C.")
         while not self.stop_event.is_set():
-            now = time.monotonic()
+            if self.config.time_mode == "sync" and time.monotonic() - self._clock_received_at > 15:
+                raise RuntimeError("Gazebo clock остановился")
+            now = self._clock_time if self.config.time_mode == "sync" else time.monotonic()
+            if self.config.time_mode == "sync" and now == last_clock_time:
+                self._wait(0.002)
+                continue
+            last_clock_time = now
             elapsed = now - started_at
             if self.config.duration_seconds and elapsed >= self.config.duration_seconds:
                 break
@@ -271,17 +302,23 @@ class GpsSpoofer:
                 previous_active = active
                 next_publish_at = now
 
-            if active:
-                self._set_message_timestamp(message)
+            if active and now >= next_publish_at:
+                if self.config.time_mode == "sync":
+                    message.header.stamp.sec = int(now)
+                    message.header.stamp.nsec = int((now - int(now)) * 1e9)
+                else:
+                    self._set_message_timestamp(message)
                 publisher.publish(message)
                 self.published_messages += 1
 
                 next_publish_at += interval
-                sleep_seconds = next_publish_at - time.monotonic()
+                sleep_seconds = next_publish_at - (self._clock_time if self.config.time_mode == "sync" else time.monotonic())
                 if sleep_seconds <= 0.0:
                     # Не пытаемся публиковать накопившийся «долг» пачкой.
-                    next_publish_at = time.monotonic()
+                    next_publish_at = now
                     sleep_seconds = 0.0
+            elif active:
+                sleep_seconds = min(next_publish_at - now, 0.25)
             else:
                 sleep_seconds = min(schedule.seconds_until_transition(elapsed), 0.25)
 
@@ -297,11 +334,14 @@ class GpsSpoofer:
                 next_status_at = time.monotonic() + self.config.status_interval_seconds
 
             if self.config.duration_seconds:
-                remaining = self.config.duration_seconds - (time.monotonic() - started_at)
+                remaining = self.config.duration_seconds - (now - started_at)
                 sleep_seconds = min(sleep_seconds, max(0.0, remaining))
+            if self.config.time_mode == "sync":
+                sleep_seconds = min(sleep_seconds, 0.002)
             self._wait(sleep_seconds)
 
-        elapsed = time.monotonic() - started_at
+        elapsed = (self._clock_time - started_at if self.config.time_mode == "sync"
+                   else time.monotonic() - started_at)
         print(
             f"GPS-спуфер остановлен: {self.published_messages} сообщений "
             f"за {elapsed:.2f} сек."
@@ -340,6 +380,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PUBLISH_RATE_HZ,
         help="частота публикации сообщений",
     )
+    parser.add_argument("--time-mode", choices=("sync", "async"), default="async")
     parser.add_argument(
         "--active-seconds",
         type=parse_finite_float,
@@ -399,6 +440,7 @@ def config_from_args(args: argparse.Namespace) -> SpoofConfig:
         start_delay_seconds=args.start_delay,
         duration_seconds=args.duration,
         status_interval_seconds=args.status_interval,
+        time_mode=args.time_mode,
     )
 
 

@@ -5,4 +5,3 @@
 *.plan text eol=lf
 *.patch text eol=lf
 *.patch -whitespace
-*.docx binary

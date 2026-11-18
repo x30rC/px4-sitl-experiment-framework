@@ -83,6 +83,7 @@ class ImuSpoofSettings:
     source_topic: str | None = None
     wait_for_activation: bool = False
     post_baseline_seconds: float = 0.0
+    time_mode: str = "sync"
 
     @property
     def topic(self) -> str:
@@ -121,6 +122,8 @@ class ImuSpoofSettings:
 
     def validate(self) -> None:
         errors: list[str] = []
+        if self.time_mode not in {"sync", "async"}:
+            errors.append("time_mode должен быть sync или async")
         if not self.world_name.strip():
             errors.append("имя мира не может быть пустым")
         if not self.model_name.strip():
@@ -200,6 +203,7 @@ class ImuSpoofPublisher:
         self._relay_next_status_at: float | None = None
         self._relay_previous_active: bool | None = None
         self._relay_received_source = Event()
+        self._relay_last_source_at: float | None = None
         self._attack_activation_event = Event()
         if not settings.wait_for_activation:
             self._attack_activation_event.set()
@@ -212,7 +216,7 @@ class ImuSpoofPublisher:
         except ImportError as exc:
             raise RuntimeError(
                 "не найдены Python bindings Gazebo (gz.msgs10/gz.transport13). "
-                "Запустите i.py внутри Ubuntu 24.04 WSL в окружении проекта"
+                "Запустите imu_publisher.py внутри Ubuntu 24.04 WSL в окружении проекта"
             ) from exc
         return Node, IMU
 
@@ -302,7 +306,10 @@ class ImuSpoofPublisher:
     def _relay_callback(self, source_message) -> None:
         if self.stop_event.is_set() or self._relay_publisher is None:
             return
-        source_time = self.message_time_seconds(source_message)
+        received_at = time.monotonic()
+        self._relay_last_source_at = received_at
+        source_time = (self.message_time_seconds(source_message)
+                       if self.settings.time_mode == "sync" else received_at)
         self._relay_received_source.set()
         attack_enabled = self._attack_activation_event.is_set()
         if attack_enabled and self._relay_started_at is None:
@@ -388,20 +395,21 @@ class ImuSpoofPublisher:
             print("IMU relay передаёт baseline и ждёт SIGUSR1 для начала spoofing.")
         wall_started_at = time.monotonic()
         while not self.stop_event.wait(0.25):
-            if (
-                not self._relay_received_source.is_set()
-                and time.monotonic() - wall_started_at > 10.0
-            ):
+            if not self._relay_received_source.is_set() and time.monotonic() - wall_started_at > 10.0:
                 raise RuntimeError(
                     f"за 10 сек не получено ни одного IMU-сообщения из {self.settings.source_topic}"
                 )
+            if (self._relay_last_source_at is not None
+                    and time.monotonic() - self._relay_last_source_at > 15.0):
+                raise RuntimeError(f"пропал поток IMU: {self.settings.source_topic}")
         elapsed = 0.0
         if self._relay_started_at is not None:
             current = self._relay_next_spoof_at or self._relay_started_at
             elapsed = max(0.0, current - self._relay_started_at)
         print(
             f"IMU relay остановлен: всего {self.published_messages}, "
-            f"spoof {self.spoofed_messages} сообщений за {elapsed:.2f} сек симуляции."
+            f"spoof {self.spoofed_messages} сообщений за {elapsed:.2f} сек "
+            f"({'Gazebo' if self.settings.time_mode == 'sync' else 'монотонные часы'})."
         )
         return 0
 
@@ -440,7 +448,8 @@ class ImuSpoofPublisher:
         )
         print(f"Частота: {self.settings.publish_rate_hz:g} Гц")
         if self.settings.source_topic:
-            print("Источник времени: timestamp штатного IMU")
+            print("Источник времени: " + ("timestamp штатного IMU" if self.settings.time_mode == "sync"
+                                        else "монотонные часы"))
             print("Частота задаёт частоту применения offset; baseline передаётся полностью")
         elif self.settings.clock_topic:
             print(f"Источник времени: Gazebo {self.settings.clock_topic}")
@@ -488,7 +497,7 @@ class ImuSpoofPublisher:
             idle_seconds=self.settings.idle_seconds,
         )
         publish_interval = 1.0 / self.settings.publish_rate_hz
-        clock_synchronized = self.settings.clock_topic is not None
+        clock_synchronized = self.settings.time_mode == "sync" and self.settings.clock_topic is not None
         started_at = (
             self._current_simulation_time() if clock_synchronized else time.monotonic()
         )
@@ -654,6 +663,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="частота публикации сообщений",
     )
     parser.add_argument("--active-seconds", type=parse_finite_float, default=0.0)
+    parser.add_argument("--time-mode", choices=("sync", "async"), default="sync")
     parser.add_argument("--idle-seconds", type=parse_finite_float, default=0.0)
     parser.add_argument("--start-delay", type=parse_finite_float, default=0.0)
     parser.add_argument(
@@ -712,6 +722,7 @@ def settings_from_args(args: argparse.Namespace) -> ImuSpoofSettings:
         source_topic=args.source_topic,
         wait_for_activation=args.wait_for_activation,
         post_baseline_seconds=args.post_baseline_seconds,
+        time_mode=args.time_mode,
     )
 
 

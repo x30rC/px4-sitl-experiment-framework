@@ -11,13 +11,14 @@ from .paths import GPS_SPOOF_SCRIPT, IMU_SPOOF_SCRIPT
 
 @dataclass(frozen=True)
 class GpsSpoofSettings:
-    """Параметры, передаваемые из сценария запуска в ``g.py``."""
+    """Параметры, передаваемые в ``gps_publisher.py``."""
 
     intensity_percent: float = 100.0
     publish_rate_hz: float = 100.0
     active_seconds: float = 0.0
     idle_seconds: float = 0.0
     duration_seconds: float = 60.0
+    time_mode: str = "async"
 
     reference_latitude: float = 47.398
     reference_longitude: float = 8.545
@@ -44,6 +45,8 @@ class GpsSpoofSettings:
 
     def validate(self) -> None:
         errors: list[str] = []
+        if self.time_mode not in {"sync", "async"}:
+            errors.append("GPS time_mode должен быть sync или async")
         for name, value in (
             ("intensity_percent", self.intensity_percent),
             ("publish_rate_hz", self.publish_rate_hz),
@@ -89,11 +92,12 @@ class GpsSpoofSettings:
             raise ValueError("; ".join(errors))
 
     def build_command(self, python_executable: Path) -> list[str]:
-        """Формирует воспроизводимую команду запуска ``g.py``."""
+        """Формирует воспроизводимую команду запуска ``gps_publisher.py``."""
         return [
             str(python_executable),
             "-u",
             str(GPS_SPOOF_SCRIPT),
+            "--time-mode", self.time_mode,
             "--intensity",
             str(self.intensity_percent),
             "--rate-hz",
@@ -139,13 +143,14 @@ class GpsSpoofSettings:
 
 @dataclass(frozen=True)
 class ImuSpoofSettings:
-    """Параметры, передаваемые полным сценарием в ``i.py``."""
+    """Параметры, передаваемые полным сценарием в ``imu_publisher.py``."""
 
     intensity_percent: float = 100.0
     publish_rate_hz: float = 250.0
     active_seconds: float = 0.0
     idle_seconds: float = 0.0
     duration_seconds: float = 60.0
+    time_mode: str = "sync"
     angular_velocity_offset_x: float = 0.0
     angular_velocity_offset_y: float = 0.0
     angular_velocity_offset_z: float = 0.5
@@ -165,6 +170,8 @@ class ImuSpoofSettings:
 
     def validate(self) -> None:
         errors: list[str] = []
+        if self.time_mode not in {"sync", "async"}:
+            errors.append("IMU time_mode должен быть sync или async")
         for name, value in (
             ("intensity_percent", self.intensity_percent),
             ("publish_rate_hz", self.publish_rate_hz),
@@ -210,6 +217,7 @@ class ImuSpoofSettings:
             str(python_executable),
             "-u",
             str(IMU_SPOOF_SCRIPT),
+            "--time-mode", self.time_mode,
             "--topic",
             self.topic,
             "--source-topic",
@@ -285,25 +293,59 @@ class SimulationTestSettings:
     interactive: bool = False
     dry_run: bool = False
     spoof_sensor: str = "gps"
+    time_mode: str = "async"
+    baseline_duration: float = 60.0
+    repeats: int = 1
+    random_mission: bool = False
+    route_min_m: float = 400.0
+    route_max_m: float = 800.0
+    route_seed: int | None = None
 
     def validate(self) -> None:
+        if self.time_mode not in {"sync", "async"}:
+            raise ValueError("time_mode должен быть sync или async")
+        if isinstance(self.repeats, bool) or not isinstance(self.repeats, int) or not 1 <= self.repeats <= 100:
+            raise ValueError("repeats должен быть целым числом от 1 до 100")
+        if (self.repeats > 1 or self.random_mission) and self.skip_mission:
+            raise ValueError("случайные маршруты и повторы требуют миссию (без --skip-mission)")
+        if self.repeats > 1 and self.skip_px4:
+            raise ValueError("повторы требуют собственного PX4 (без --skip-px4)")
+        if self.route_seed is not None and (isinstance(self.route_seed, bool) or not isinstance(self.route_seed, int)):
+            raise ValueError("route_seed должен быть целым числом")
+        if not (math.isfinite(self.route_min_m) and math.isfinite(self.route_max_m)
+                and 100 <= self.route_min_m <= self.route_max_m <= 2000):
+            raise ValueError("дистанция маршрута: 100 <= route-min-m <= route-max-m <= 2000")
         for name, value in (
             ("px4_startup_delay", self.px4_startup_delay),
             ("stabilization_delay", self.stabilization_delay),
             ("wait_after_spoof", self.wait_after_spoof),
             ("mission_timeout", self.mission_timeout),
+            ("baseline_duration", self.baseline_duration),
         ):
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} не может быть отрицательным")
         if self.mission_timeout == 0.0:
             raise ValueError("тайм-аут MAVSDK должен быть больше нуля")
-        if self.spoof_sensor not in {"gps", "imu", "both"}:
-            raise ValueError("spoof_sensor должен быть gps, imu или both")
+        if self.baseline_duration == 0.0:
+            raise ValueError("длительность чистого полёта должна быть больше нуля")
+        if self.spoof_sensor == "none":
+            return
+        sensors = self.spoof_sensor.replace("both", "gps,imu").split(",")
+        if not self.spoof_sensor or any(s not in {"gps", "imu", "mag", "baro"} for s in sensors) or len(set(sensors)) != len(sensors):
+            raise ValueError("spoof_sensor: none, gps, imu, mag, baro или их комбинация через запятую")
 
     @property
     def use_gps(self) -> bool:
-        return self.spoof_sensor in {"gps", "both"}
+        return "gps" in self.spoof_sensor.replace("both", "gps,imu").split(",")
 
     @property
     def use_imu(self) -> bool:
-        return self.spoof_sensor in {"imu", "both"}
+        return "imu" in self.spoof_sensor.replace("both", "gps,imu").split(",")
+
+    @property
+    def use_mag(self) -> bool:
+        return "mag" in self.spoof_sensor.split(",")
+
+    @property
+    def use_baro(self) -> bool:
+        return "baro" in self.spoof_sensor.split(",")

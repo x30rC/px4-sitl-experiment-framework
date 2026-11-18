@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import time
 from pathlib import Path
 
 from .paths import LOG_DESTINATION, PX4_LOG_SOURCE
@@ -20,7 +19,15 @@ class Px4LogCollector:
         self.source_directory = source_directory
         self.destination_directory = destination_directory
 
-    def collect_latest_since(self, started_at_epoch: float) -> Path | None:
+    def snapshot_existing(self) -> set[Path]:
+        """Список ULog до запуска: PX4 может выставлять mtime не по wall clock."""
+        if not self.source_directory.is_dir():
+            return set()
+        return set(self.source_directory.rglob("*.ulg"))
+
+    def collect_latest_since(
+        self, started_at_epoch: float, *, existing_logs: set[Path] | None = None
+    ) -> Path | None:
         if not self.source_directory.is_dir():
             print(f"Папка с PX4-логами не существует: {self.source_directory}")
             return None
@@ -28,7 +35,9 @@ class Px4LogCollector:
         candidates: list[Path] = []
         for log_file in self.source_directory.rglob("*.ulg"):
             try:
-                if log_file.stat().st_mtime >= started_at_epoch - 2.0:
+                if (existing_logs is not None and log_file not in existing_logs) or (
+                    existing_logs is None and log_file.stat().st_mtime >= started_at_epoch - 2.0
+                ):
                     candidates.append(log_file)
             except FileNotFoundError:
                 continue
@@ -40,8 +49,10 @@ class Px4LogCollector:
         latest_log = max(candidates, key=lambda path: path.stat().st_mtime)
         destination_name = f"{latest_log.parent.name}_{latest_log.stem}"
         destination = self.destination_directory / destination_name
-        if destination.exists():
-            destination = destination.with_name(f"{destination.name}_{int(time.time())}")
+        suffix = 1
+        while destination.exists():
+            destination = self.destination_directory / f"{destination_name}_{suffix}"
+            suffix += 1
 
         destination.mkdir(parents=True, exist_ok=False)
         destination_file = destination / latest_log.name
